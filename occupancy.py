@@ -244,13 +244,12 @@ def plot_passenger_locations_heatmap(passenger_locations_per_station, path):
     plt.title(f'Train occupancy')
     plt.ylabel('Station')
     plt.tight_layout()
-    plt.savefig('/Users/dan/Downloads/picc_occupancy.pdf')
     plt.savefig('/Users/dan/Downloads/picc_occupancy.png')
 
 def plot_occupancy_overlay(passenger_locations_per_station, station):
 
     # Path to your overlay image
-    overlay_path = '/Users/dan/Downloads/trainsparency.png'
+    overlay_path = 'assets/trainsparency.png'
     overlay_img = Image.open(overlay_path).convert("RGBA")
 
     # Get image dimensions and aspect ratio
@@ -330,7 +329,7 @@ def plot_occupancy_overlay(passenger_locations_per_station, station):
     plt.tight_layout()
 
     # Define the output path for the final image
-    output_path = '/Users/dan/Downloads/histogram_with_overlay_fixed_heights.png'
+    output_path = 'histogram_with_overlay_fixed_heights.png'
 
     # Save the figure with a transparent background
     fig.savefig(output_path, dpi=fig_dpi, bbox_inches='tight', transparent=True)
