@@ -89,6 +89,14 @@ def create_london_underground_graph(df, separate_lines=True):
                            To_ASC=row['To ASC'])
         return G
 
+def _is_subsequence(sub, main):
+    if len(sub) > len(main):
+        return False
+    for i in range(len(main) - len(sub) + 1):
+        if main[i:i+len(sub)] == sub:
+            return True
+    return False
+
 def extract_station_sequences_from_graphs(line_graphs):
     """
     Extracts ordered station sequences for each line from NetworkX graphs,
@@ -138,7 +146,15 @@ def extract_station_sequences_from_graphs(line_graphs):
                 seen.add(seq_tuple)
                 unique_sequences.append(seq)
 
-        lines_dict[line] = unique_sequences
+        largest_sequences = []
+        unique_sequences = sorted(unique_sequences, key=len, reverse=True)
+        for i, seqA in enumerate(unique_sequences):
+            # Only keep seqA if it's not fully contained in another longer sequence
+            if not any(_is_subsequence(seqA, seqB) for j, seqB in enumerate(unique_sequences)
+                       if j != i and len(seqB) >= len(seqA)):
+                largest_sequences.append(seqA)
+
+        lines_dict[line] = largest_sequences
 
     return lines_dict
 
