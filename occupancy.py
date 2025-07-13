@@ -139,7 +139,7 @@ def get_boarders_alighters_path(G, line, start, end):
         return None, None, None
 
 
-def plot_passenger_locations_heatmap(passenger_locations_per_station, path):
+def plot_passenger_locations_heatmap(passenger_locations_per_station, path, name = None):
 
     N = len(passenger_locations_per_station.values())
     np.random.seed(0)
@@ -171,10 +171,10 @@ def plot_passenger_locations_heatmap(passenger_locations_per_station, path):
     plt.title(f"Train occupancy")
     plt.ylabel("Station")
     plt.tight_layout()
-    plt.savefig("occupancy.png")
+    plt.savefig("occupancy.png" if name == None else name)
 
 
-def plot_occupancy_overlay(passenger_locations_per_station, station):
+def plot_occupancy_overlay(passenger_locations_per_station, station, name = None):
 
     overlay_path = "assets/trainsparency.png"
     overlay_img = Image.open(overlay_path).convert("RGBA")
@@ -244,7 +244,7 @@ def plot_occupancy_overlay(passenger_locations_per_station, station):
     plt.tight_layout()
 
     fig.savefig(
-        "histogram_with_overlay.png", dpi=fig_dpi, bbox_inches="tight", transparent=True
+        "histogram_with_overlay.png" if name == None else name, dpi=fig_dpi, bbox_inches="tight", transparent=True
     )
 
 
@@ -284,8 +284,6 @@ def create_line_graph(all_routes):
     G = nx.DiGraph()
     for seq in all_routes:
         for i in range(len(seq) - 1):
-            print(seq[i], seq[i + 1], "forward")
-            print(seq[i + 1], seq[i], "reverse")
             _add(G, seq[i], seq[i + 1], "forward")
             _add(G, seq[i + 1], seq[i], "reverse")
     return G
@@ -427,7 +425,6 @@ def load_piccadilly_routes(raw_routes, ordering):
 
     def orient(r: list[str]) -> list[str]:
         """Flip route if its 2nd station lies further west than its 1st."""
-        print(r[0], r[1], pos[r[1]] < pos[r[0]])
         return list(reversed(r)) if pos[r[1]] < pos[r[0]] else r
 
     oriented = [orient(r) for r in raw_routes]
@@ -493,24 +490,114 @@ if __name__ == "__main__":
             line_entrances["Piccadilly"][0], **line_entrances["Piccadilly"][1]
         )
 
-        positions_on = [stations[s][1] for s in stations]
+        idx = 0     # because this run is westbound
 
-        num_samples = 1000
-        seed = 42
+        positions_on = [stations[s][idx] for s in path[:-1]]   # aligned with n_on / n_off
+
+        # ALSO shift alighters so it is station-based not edge-based
+        station_boarders  = boarders[:]                # already path-aligned
+        station_alighters = [0] + alighters[:-1]       # move each value back by one
+
+        pprint(list(zip(positions_on, station_boarders, station_alighters)))
+
+        print(len(positions_on), len(station_boarders), len(station_alighters))
+
+        print(np.cumsum(station_boarders) - np.cumsum(station_alighters))
+        # exit(0)
 
         passenger_locations_per_station, mixture_weights_per_station, alpha_samples = (
             sample_passenger_locations_per_station(
-                n_on=boarders,
-                n_off=alighters,
-                positions_on=positions_on,
-                path=path,
-                num_samples=num_samples,
-                seed=seed,
+                n_on        = station_boarders,
+                n_off       = station_alighters,
+                positions_on= positions_on,
+                path        = path,
+                num_samples = 10_000,
+                seed        = 42,
             )
         )
 
-        plot_passenger_locations_heatmap(passenger_locations_per_station, path)
+        plot_passenger_locations_heatmap(passenger_locations_per_station, path, f"occupancy_stations_path_{i}")
 
-        pprint(passenger_locations_per_station.keys())
+        plot_occupancy_overlay(passenger_locations_per_station, "Knightsbridge", f"occupancy_path_{i}")
 
-        plot_occupancy_overlay(passenger_locations_per_station, "Piccadilly Circus")
+        # print([x.shape for x in mixture_weights_per_station.values()])
+
+        print(np.sum(mixture_weights_per_station['Knightsbridge']))
+
+        from scipy.stats import truncnorm
+
+        passengers_station = []
+        passengers_boarding = []
+        passengers = []
+        for i, station in enumerate(path[:-1]):
+            np.random.shuffle(passengers)
+            passengers = passengers[:-int(alighters[i]) * 100]
+
+            mean = stations[station][1]
+            std = 30
+
+            a, b = (0 - mean) / std, (100 - mean) / std
+
+            boarding = truncnorm.rvs(a, b, loc = mean, scale = std, size = 100 * int(boarders[i]))
+            passengers_boarding.append(boarding)
+            passengers.extend(boarding)
+            passengers_station.append(passengers.copy())
+
+        # Example data creation (Replace this with your actual data)
+        # Let's assume each array has a variable number of data points
+        N =len(passengers_station)  # Number of arrays
+        np.random.seed(0)  # For reproducibility
+
+        # Create a list of N arrays with random data between 0 and 100
+        data_list = passengers_station
+
+        # Define the number of bins and the range
+        num_bins = 100
+        range_min, range_max = 0, 100
+        bins = np.linspace(range_min, range_max, num_bins + 1)  # 101 edges for 100 bins
+
+        # Initialize a 2D array to hold histogram counts
+        hist_matrix = np.zeros((N, num_bins))
+        hist_matrix_sum = np.zeros((N, num_bins))
+
+        # Compute histograms for each array
+        for i, data in enumerate(data_list):
+            counts, _ = np.histogram(data, bins=bins)
+            hist_matrix[i, :] = counts
+            if i > 0:
+                hist_matrix_sum[i, :] = hist_matrix_sum[i - 1, :] + counts
+
+        # Optionally, normalize the histograms (e.g., to frequency or probability)
+        # Uncomment the following lines if normalization is desired
+        hist_matrix = hist_matrix / hist_matrix.sum(axis=1, keepdims=True)
+
+        # Plotting the heatmap
+        plt.figure(figsize=(12, 8))
+
+        sns.heatmap(hist_matrix, cmap='viridis',
+                    cbar_kws={'label': 'Density'},
+                    xticklabels=False,
+                    yticklabels=path[:-1])  # Hide y-axis labels if N is large
+
+        plt.title(f'Train occupancy')
+        plt.ylabel('Station')
+        plt.tight_layout()
+        plt.savefig('picc_occupancy.pdf')
+        plt.savefig('picc_occupancy.png')
+
+        plt.clf()
+
+        # Plotting the heatmap
+        plt.figure(figsize=(12, 8))
+
+        sns.heatmap(hist_matrix_sum, cmap='viridis',
+                    cbar_kws={'label': 'Density'},
+                    xticklabels=False,
+                    yticklabels=path[:-1])  # Hide y-axis labels if N is large
+
+        plt.title(f'Train occupancy')
+        plt.ylabel('Station')
+        plt.tight_layout()
+        plt.savefig('picc_occupancy_sum.pdf')
+        plt.savefig('picc_occupancy_sum.png')
+        exit(0)

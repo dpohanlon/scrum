@@ -6,33 +6,69 @@ from numpyro.infer import Predictive
 import jax
 
 
+# def compute_alphas(n_on, n_off):
+#     """
+#     Compute alpha[i] = fraction that remain at station i.
+#     This requires knowing the total population 'just before' station i's alighting.
+#     One easy approach: do a forward pass to find station populations, then alpha_i = 1 - n_off[i]/population_before_i.
+#     """
+#     num_rounds = len(n_on)
+#     population_before = jnp.zeros(
+#         num_rounds + 1
+#     )  # station 0..num_rounds; station i is before i-th alighting
+
+#     # forward pass to get population before station i
+#     # station 0: population_before[0] = 0 (start empty)
+#     pop = 0.0
+#     new_pop = []
+#     for i in range(num_rounds):
+#         pop += n_on[i]
+#         population_before = population_before.at[i + 1].set(pop)
+#         pop -= n_off[i]  # after station i, for next iteration
+
+#     # now alpha_i = fraction that remain
+#     alpha = []
+#     for i in range(num_rounds):
+#         p_i = population_before[i + 1]  # pop before alighting at station i
+#         a_i = 1.0 - (n_off[i] / (p_i + 1e-10))
+#         a_i = jnp.clip(a_i, 0.0, 1.0)
+#         alpha.append(a_i)
+#     alpha = jnp.array(alpha)
+#     return alpha
+
 def compute_alphas(n_on, n_off):
     """
     Compute alpha[i] = fraction that remain at station i.
-    This requires knowing the total population 'just before' station i's alighting.
-    One easy approach: do a forward pass to find station populations, then alpha_i = 1 - n_off[i]/population_before_i.
+    This version is robust to data inconsistencies by ensuring the
+    passenger count never drops below zero.
     """
     num_rounds = len(n_on)
-    population_before = jnp.zeros(
-        num_rounds + 1
-    )  # station 0..num_rounds; station i is before i-th alighting
-
-    # forward pass to get population before station i
-    # station 0: population_before[0] = 0 (start empty)
+    population_before = jnp.zeros(num_rounds + 1)
     pop = 0.0
-    new_pop = []
     for i in range(num_rounds):
+        # Add passengers who boarded at station i
         pop += n_on[i]
-        population_before = population_before.at[i + 1].set(pop)
-        pop -= n_off[i]  # after station i, for next iteration
 
-    # now alpha_i = fraction that remain
+        # Store the population before alighting at the next station (i+1).
+        # Crucially, ensure this value cannot be negative due to prior data errors.
+        population_before = population_before.at[i + 1].set(jnp.maximum(0.0, pop))
+
+        # For the next iteration, update the population by subtracting alighters
+        pop -= n_off[i]
+
+    # Calculate alpha values using the corrected population counts
     alpha = []
     for i in range(num_rounds):
-        p_i = population_before[i + 1]  # pop before alighting at station i
+        # This p_i is now guaranteed to be non-negative
+        p_i = population_before[i + 1]
+
+        # Calculate survival fraction. Add a small epsilon to prevent division by zero.
         a_i = 1.0 - (n_off[i] / (p_i + 1e-10))
+
+        # Clip the result to handle edge cases (e.g., if n_off > p_i due to data noise)
         a_i = jnp.clip(a_i, 0.0, 1.0)
-        alpha.append(a_i)
+        alpha.append(a_i + 1E-6)
+
     alpha = jnp.array(alpha)
     return alpha
 
@@ -75,6 +111,37 @@ def precompute_survivors(n_on, alpha):
             survivors = survivors.at[r, k].set(s)
     return survivors
 
+# def precompute_survivors(n_on, alpha):
+#     """
+#     Given n_on[r] and alpha[i], compute survivors[r,k], which is the
+#     expected number of passengers who boarded at station r and are still
+#     on the train upon arrival at station k.
+#     """
+#     num_rounds = len(n_on)
+#     survivors = jnp.zeros((num_rounds, num_rounds))
+
+#     # alpha_cum[i] = alpha[0] * ... * alpha[i-1]
+#     # We pre-calculate the cumulative product of survival probabilities.
+#     alpha_cum = jnp.cumprod(jnp.concatenate([jnp.ones([1]), alpha]))
+
+#     # A passenger boarding at station r (path[r]) must survive the stops
+#     # at stations r+1, r+2, ..., k. The probabilities for this are
+#     # alpha[r], alpha[r+1], ..., alpha[k-1].
+#     # The product of these is alpha_cum[k] / alpha_cum[r].
+#     for r in range(num_rounds):
+#         for k in range(num_rounds):
+#             if k > r:
+#                 # Passengers boarded at r and have survived stops up to k.
+#                 s = n_on[r] * (alpha_cum[k] / alpha_cum[r])
+#             elif k == r:
+#                 # Passengers just boarded at r. All are present.
+#                 s = n_on[r]
+#             else:
+#                 # Station k is before station r, so these passengers haven't boarded yet.
+#                 s = 0.0
+#             survivors = survivors.at[r, k].set(s)
+
+#     return survivors
 
 def passenger_location_model(n_on, n_off, positions_on):
     """
@@ -98,6 +165,7 @@ def passenger_location_model(n_on, n_off, positions_on):
     # 2) compute alpha[i] in python (cannot do it inside the model if it depends on n_off, etc.)
     #    so we do it as "deterministic" from outside. We'll replicate it as a 'deterministic' node for illustration.
     alpha = compute_alphas(n_on, n_off)
+
     numpyro.deterministic("alpha", alpha)
 
     # 3) build the survivors array outside the model, or do so in a 'deterministic' node, but let's just do it here
@@ -111,7 +179,8 @@ def passenger_location_model(n_on, n_off, positions_on):
         # sum of all survivors at station k
         total_k = jnp.sum(survivors_2d[: k + 1, k])
         mixture_weights_k = jnp.where(
-            total_k > 0, survivors_2d[: k + 1, k] / total_k, jnp.zeros(k + 1)
+            total_k > 0, survivors_2d[: k + 1, k]/ total_k,
+            jnp.zeros(k + 1)
         )
 
         # define mixture distribution
@@ -133,6 +202,8 @@ def sample_passenger_locations_per_station(
 ):
     rng_key = jax.random.PRNGKey(seed)
     num_rounds = len(n_on)
+
+    print('alphas', compute_alphas(n_on, n_off))
 
     return_sites = []
     for i in range(num_rounds):
