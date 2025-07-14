@@ -111,38 +111,6 @@ def precompute_survivors(n_on, alpha):
             survivors = survivors.at[r, k].set(s)
     return survivors
 
-# def precompute_survivors(n_on, alpha):
-#     """
-#     Given n_on[r] and alpha[i], compute survivors[r,k], which is the
-#     expected number of passengers who boarded at station r and are still
-#     on the train upon arrival at station k.
-#     """
-#     num_rounds = len(n_on)
-#     survivors = jnp.zeros((num_rounds, num_rounds))
-
-#     # alpha_cum[i] = alpha[0] * ... * alpha[i-1]
-#     # We pre-calculate the cumulative product of survival probabilities.
-#     alpha_cum = jnp.cumprod(jnp.concatenate([jnp.ones([1]), alpha]))
-
-#     # A passenger boarding at station r (path[r]) must survive the stops
-#     # at stations r+1, r+2, ..., k. The probabilities for this are
-#     # alpha[r], alpha[r+1], ..., alpha[k-1].
-#     # The product of these is alpha_cum[k] / alpha_cum[r].
-#     for r in range(num_rounds):
-#         for k in range(num_rounds):
-#             if k > r:
-#                 # Passengers boarded at r and have survived stops up to k.
-#                 s = n_on[r] * (alpha_cum[k] / alpha_cum[r])
-#             elif k == r:
-#                 # Passengers just boarded at r. All are present.
-#                 s = n_on[r]
-#             else:
-#                 # Station k is before station r, so these passengers haven't boarded yet.
-#                 s = 0.0
-#             survivors = survivors.at[r, k].set(s)
-
-#     return survivors
-
 def passenger_location_model(n_on, n_off, positions_on):
     """
     We'll assume we've precomputed alpha and the survivors array,

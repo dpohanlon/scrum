@@ -511,7 +511,7 @@ if __name__ == "__main__":
                 n_off       = station_alighters,
                 positions_on= positions_on,
                 path        = path,
-                num_samples = 10_000,
+                num_samples = 100_000,
                 seed        = 42,
             )
         )
