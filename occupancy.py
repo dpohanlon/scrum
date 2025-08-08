@@ -141,10 +141,11 @@ def get_boarders_alighters_path(G, line, start, end):
 
 def plot_passenger_locations_heatmap(passenger_locations_per_station, path, name = None):
 
-    N = len(passenger_locations_per_station.values())
+    station_order = [s for s in path if s in passenger_locations_per_station]
+    N = len(station_order)
     np.random.seed(0)
 
-    data_list = passenger_locations_per_station.values()
+    data_list = [passenger_locations_per_station[s] for s in station_order]
 
     num_bins = 50
     range_min, range_max = 0, 100
@@ -165,7 +166,7 @@ def plot_passenger_locations_heatmap(passenger_locations_per_station, path, name
         cmap="viridis",
         cbar_kws={"label": "Density"},
         xticklabels=False,
-        yticklabels=path[:-1],
+        yticklabels=station_order,
     )
 
     plt.title(f"Train occupancy")
@@ -490,7 +491,7 @@ if __name__ == "__main__":
             line_entrances["Piccadilly"][0], **line_entrances["Piccadilly"][1]
         )
 
-        idx = 0     # because this run is westbound
+        idx = 1     # because this run is westbound
 
         positions_on = [stations[s][idx] for s in path[:-1]]   # aligned with n_on / n_off
 

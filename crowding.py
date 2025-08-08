@@ -78,3 +78,5 @@ def live_crowding(station_name: str) -> dict:
 
 if __name__ == "__main__":
     print(live_crowding(best_station_match("Holborn")[0]))
+    print(live_crowding(best_station_match("King's Cross")[0]))
+    print(live_crowding(best_station_match("South Kensington")[0]))
