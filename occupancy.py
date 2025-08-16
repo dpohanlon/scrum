@@ -3,12 +3,16 @@ import matplotlib.pyplot as plt
 
 from pprint import pprint
 
+from scipy.stats import truncnorm
+
 mpl.use("Agg")
 
 import numpy as np
 
 import pandas as pd
 import seaborn as sns
+
+import re
 
 from matplotlib import rcParams
 import networkx as nx
@@ -72,19 +76,97 @@ def hex_to_colormap(hex_color, name="custom_colormap", n=256):
     return cmap
 
 
-def get_boarders_alighters(file_name, line="PIC"):
+# def get_boarders_alighters(file_name, line="PIC"):
 
-    boarders_df = pd.read_excel(file_name, sheet_name="Station_Boarders")
-    alighters_df = pd.read_excel(file_name, sheet_name="Station_Alighters")
+#     boarders_df = pd.read_excel(file_name, sheet_name="Station_Boarders")
+#     alighters_df = pd.read_excel(file_name, sheet_name="Station_Alighters")
 
-    boarders_df.columns = boarders_df.iloc[1]
-    boarders_df = boarders_df[2:]
+#     boarders_df.columns = boarders_df.iloc[1]
+#     boarders_df = boarders_df[2:]
 
-    alighters_df.columns = alighters_df.iloc[1]
-    alighters_df = alighters_df[2:]
+#     alighters_df.columns = alighters_df.iloc[1]
+#     alighters_df = alighters_df[2:]
 
-    boarders_df = boarders_df[boarders_df["Line"] == "PIC"]
-    alighters_df = alighters_df[alighters_df["Line"] == "PIC"]
+#     boarders_df = boarders_df[boarders_df["Line"] == "PIC"]
+#     alighters_df = alighters_df[alighters_df["Line"] == "PIC"]
+
+#     return boarders_df, alighters_df
+
+def get_boarders_alighters(file_name, line="PIC", time_str=None, tolerance_min=30):
+    """
+    Read Excel sheets 'Station_Boarders' / 'Station_Alighters'.
+    After promoting the 2nd row to headers and dropping the top two rows,
+    filter to `line`. If `time_str='HH:MM'` is given, pick the nearest
+    time-range column like '1400-1415' and expose it as 'Total'.
+
+    If no time is given, the original 'Total' column is left as-is.
+    """
+
+    def _prepare(df):
+        df = df.copy()
+        df.columns = df.iloc[1]           # row 1 becomes header
+        df = df.iloc[2:].reset_index(drop=True)
+        return df
+
+    def _to_minutes(hhmm):
+        h, m = map(int, hhmm.split(":"))
+        if not (0 <= h < 24 and 0 <= m < 60):
+            raise ValueError
+        return h * 60 + m
+
+    def _is_timerange(s):
+        s = str(s).strip()
+        return bool(re.fullmatch(r"\d{3,4}-\d{3,4}", s))
+
+    def _midpoint_minutes(rng):
+        a, b = str(rng).split("-")
+        a = a.zfill(4); b = b.zfill(4)
+        ah, am = int(a[:2]), int(a[2:])
+        bh, bm = int(b[:2]), int(b[2:])
+        t1, t2 = ah*60 + am, bh*60 + bm
+        if t2 < t1:
+            t2 += 24*60
+        return ((t1 + t2) / 2.0) % (24*60)
+
+    def _select_time_col(df, want_minutes):
+        time_cols = [c for c in df.columns if _is_timerange(c)]
+        if not time_cols:
+            return None, None
+        mids = np.array([_midpoint_minutes(c) for c in time_cols])
+        idx  = int(np.argmin(np.abs(mids - want_minutes)))
+        chosen = time_cols[idx]
+        delta  = abs(int(round(mids[idx] - want_minutes)))
+        return chosen, delta
+
+    # read + prep
+    boarders_df  = _prepare(pd.read_excel(file_name, sheet_name="Station_Boarders"))
+    alighters_df = _prepare(pd.read_excel(file_name, sheet_name="Station_Alighters"))
+
+    # filter line (exact code, e.g. 'PIC')
+    boarders_df  = boarders_df[boarders_df["Line"] == line]
+    alighters_df = alighters_df[alighters_df["Line"] == line]
+
+    if time_str is None:
+        return boarders_df, alighters_df
+
+    # parse time and select nearest range column in each sheet
+    want = _to_minutes(time_str)
+    b_col, b_delta = _select_time_col(boarders_df, want)
+    a_col, a_delta = _select_time_col(alighters_df, want)
+
+    if b_col is None or a_col is None:
+        raise RuntimeError("No time-range columns like 'HHMM-HHMM' found in one or both sheets.")
+    if (b_delta is not None and b_delta > tolerance_min) or (a_delta is not None and a_delta > tolerance_min):
+        raise RuntimeError(
+            f"No time column within {tolerance_min} min of {time_str}: "
+            f"nearest boarders={b_col} (Δ≈{b_delta} min), alighters={a_col} (Δ≈{a_delta} min)."
+        )
+
+    # expose chosen time columns as numeric 'Total'
+    boarders_df  = boarders_df.copy()
+    alighters_df = alighters_df.copy()
+    boarders_df["Total"]  = pd.to_numeric(boarders_df[b_col], errors="coerce").fillna(0.0)
+    alighters_df["Total"] = pd.to_numeric(alighters_df[a_col], errors="coerce").fillna(0.0)
 
     return boarders_df, alighters_df
 
@@ -440,8 +522,265 @@ def load_piccadilly_routes(raw_routes, ordering):
 
     return unique
 
+def expected_onboard_per_station(n_on, n_off):
+    """P_k: expected # on board before alighting at station k (snapshot)."""
+    P = []
+    load = 0.0
+    for on, off in zip(n_on, n_off):
+        P.append(load)                 # before alighting at this station
+        off_eff = min(off, load)       # can’t alight more than are on
+        load = load - off_eff + on     # after this station’s turn
+    return np.array(P)                 # len = len(n_on)
 
-if __name__ == "__main__":
+def directional_full_paths(G, dir_code):
+    """
+    Return every full path from a direction's sources (no predecessors)
+    to its sinks (no successors), using only edges usable in `dir_code`.
+    """
+    allowed = code_to_direction(dir_code)
+    H = nx.DiGraph(
+        (u, v, d) for u, v, d in G.edges(data=True)
+        if allowed in d.get("dir_set", {d["direction"]})
+    )
+    sources = [n for n in H if H.in_degree(n) == 0]
+    sinks   = [n for n in H if H.out_degree(n) == 0]
+
+    paths = []
+    for s in sources:
+        for t in sinks:
+            if s == t:
+                continue
+            try:
+                for p in nx.all_simple_paths(H, source=s, target=t):
+                    paths.append(p)
+            except nx.NetworkXNoPath:
+                pass
+    return paths
+
+
+def station_arrays_for_path(G, path):
+    """
+    Build station-aligned arrays along `path`:
+    n_on[i]  = boarders at station path[i] (edge path[i]→path[i+1])
+    n_off[i] = alighters at station path[i] (edge path[i-1]→path[i]); n_off[0]=0
+    """
+    n = len(path) - 1
+    n_on  = [0.0] * n
+    n_off = [0.0] * n
+    for i, (u, v) in enumerate(zip(path[:-1], path[1:])):
+        n_on[i] = G[u][v].get("boarders", 0.0)
+        if i > 0:
+            n_off[i] = G[path[i-1]][path[i]].get("alighters", 0.0)
+    return n_on, n_off
+
+def direction_subgraph(G, dir_code):
+    """Keep only edges usable in this LU dir_code ('WB','EB','SB','NB')."""
+    allowed = code_to_direction(dir_code)  # 'forward' | 'reverse'
+    return nx.DiGraph(
+        (u, v, d) for u, v, d in G.edges(data=True)
+        if allowed in d.get("dir_set", {d["direction"]})
+    )
+
+def upstream_chain(H, pivot):
+    """
+    Follow unique predecessors from `pivot` until there are none.
+    For Piccadilly WB this walks Cockfosters → … → pivot.
+    """
+    chain = [pivot]
+    cur = pivot
+    while True:
+        preds = list(H.predecessors(cur))
+        if not preds:                     # reached the upstream terminus
+            break
+        if len(preds) > 1:
+            # If this ever happens on Piccadilly, pick one deterministically.
+            # (Not expected WB; there is a single east-side branch.)
+            preds.sort()
+        cur = preds[0]
+        chain.insert(0, cur)
+    return chain
+
+WEST_TERMINI = {"Uxbridge", "Heathrow Terminal 5 LU", "Heathrow Terminal 4 LU"}
+EAST_TERMINI = {"Cockfosters"}
+
+def direction_subgraph(G, dir_code):
+    """Keep only edges usable in this LU dir_code."""
+    allowed = code_to_direction(dir_code)  # 'forward' | 'reverse'
+    return nx.DiGraph(
+        (u, v, d) for u, v, d in G.edges(data=True)
+        if allowed in d.get("dir_set", {d["direction"]})
+    )
+
+def build_paths_through_pivot(G, pivot, dir_code):
+    """
+    Return full paths that *pass through* `pivot`, built as:
+      [upstream-terminus → … → pivot]  +  [pivot → … → target-terminus]
+    using only edges consistent with `dir_code`.
+    """
+    H = direction_subgraph(G, dir_code)
+    if pivot not in H:
+        return []  # nothing to do
+
+    if dir_code in ("WB", "SB"):
+        sources = [t for t in EAST_TERMINI if t in H]   # upstream side
+        targets = [t for t in WEST_TERMINI if t in H]
+    else:  # EB/NB
+        sources = [t for t in WEST_TERMINI if t in H]
+        targets = [t for t in EAST_TERMINI if t in H]
+
+    # pick the first upstream terminus that can reach the pivot
+    src = next((s for s in sources if nx.has_path(H, s, pivot)), None)
+    if src is None:
+        return []
+
+    prefix = nx.shortest_path(H, src, pivot)  # includes pivot at the end
+
+    paths = []
+    for t in targets:
+        if nx.has_path(H, pivot, t):
+            for tail in nx.all_simple_paths(H, source=pivot, target=t):
+                paths.append(prefix[:-1] + tail)  # avoid double 'pivot'
+    return paths
+
+def get_paths(station, direction, time):
+
+    lines = json.load(open("london_underground_lines.json", "rb"))
+    line_entrances = json.load(open("line_entrances.json", "rb"))
+
+    routes = list(lines["Piccadilly"])
+
+    # Looks weird, don't worry about it
+    ordering = merge_piccadilly_lists(line_entrances)
+
+    routes = load_piccadilly_routes(routes, ordering)
+
+    route_graph = create_line_graph(routes)
+
+    boarders_df, alighters_df = get_boarders_alighters(
+        "/Users/dan/Downloads/NBT23TWT_outputs.xlsx", line="PIC", time_str = time
+    )
+
+    route_graph = populate_boarders_alighters_graph(
+        route_graph, boarders_df, alighters_df
+    )
+
+    paths_through_pivot = build_paths_through_pivot(route_graph, station, direction)
+
+    # merged entrance dict for west/east positions
+    stations = dict(line_entrances["Piccadilly"][0], **line_entrances["Piccadilly"][1])
+
+    return paths_through_pivot, route_graph, stations
+
+def get_occupancy(station = "Leicester Square", direction = "WB", time = "08:00"):
+
+    paths_through_pivot, route_graph, stations = get_paths(station, direction, time)
+
+    pos_idx  = 1 if direction in ["WB", "SB"] else 0   # westbound uses index 1
+
+    num_samples = 1000
+    seed = 42
+
+    locs = []
+
+    for i, full_path in enumerate(paths_through_pivot):
+        # 2) station-based on/off along the *full* path from terminus
+        n_on, n_off = station_arrays_for_path(route_graph, full_path)
+
+        # 3) positions aligned to the full path
+        positions_on = [stations[s][pos_idx] for s in full_path[:-1]]
+
+        # 4) run the model on the full path (starts at the terminus → no fake initial load)
+        passenger_locs, mix_wts, alpha_samples = sample_passenger_locations_per_station(
+            n_on=n_on,
+            n_off=n_off,
+            positions_on=positions_on,
+            path=full_path,
+            num_samples=num_samples,
+            seed=seed,
+        )
+
+        locs.append(passenger_locs)
+
+    return locs
+
+def get_occupancy_hist(this_station = "Leicester Square", direction = "WB", time = "08:00"):
+
+    paths_through_pivot, route_graph, stations = get_paths(this_station, direction, time)
+
+    for i, full_path in enumerate(paths_through_pivot):
+
+        SCALE = 50                 # samples per person (reduce if memory is tight)
+        STD   = 30                 # cm-ish; same as before
+        idx   = 1 if direction in ("WB","SB") else 0   # westbound uses index 1
+
+        n_on, n_off = station_arrays_for_path(route_graph, full_path)
+
+        pivot_idx = full_path.index(this_station)
+
+        passengers           = []        # evolving list of positions on board
+        passengers_station   = []        # snapshots to plot (from pivot onward)
+        station_labels       = []        # y-axis labels (from pivot onward)
+
+        for j, station in enumerate(full_path[:-1]):
+            print(i, j)
+            # 1) alight FIRST at this station
+            np.random.shuffle(passengers)
+            off = int(n_off[j])
+            if off > 0:
+                passengers = passengers[:-SCALE * off] if SCALE * off <= len(passengers) else []
+
+            # 2) then board at this station
+            mean = stations[station][idx]
+            a, b = (0 - mean) / STD, (100 - mean) / STD
+            on   = int(n_on[j])
+            if on > 0:
+                boarding = truncnorm.rvs(a, b, loc=mean, scale=STD, size=SCALE * on)
+                passengers.extend(boarding)
+
+            # 3) record snapshot only from the pivot onward
+            if j >= pivot_idx:
+                passengers_station.append(np.array(passengers))
+                station_labels.append(station)
+
+        # ---------- probability heatmap (rows sum to 1) ----------
+        num_bins = 100
+        bins = np.linspace(0, 100, num_bins + 1)
+        hist_prob = np.zeros((len(passengers_station), num_bins))
+        for p, data in enumerate(passengers_station):
+            counts, _ = np.histogram(data, bins=bins)
+            s = counts.sum()
+            hist_prob[p, :] = counts / s if s > 0 else counts
+
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(hist_prob, cmap='viridis',
+                    cbar_kws={'label': 'Probability'},
+                    xticklabels=False, yticklabels=station_labels)
+        plt.title('Train occupancy – probability per station')
+        plt.ylabel('Station')
+        plt.tight_layout()
+        plt.savefig(f'occupancy_prob_{i}.png')
+
+        # ---------- expected-counts heatmap (rows scale with people aboard) ----------
+        P_full = expected_onboard_per_station(n_on, n_off)      # along full path
+        P_plot = P_full[pivot_idx:pivot_idx + len(station_labels)]
+
+        hist_counts = np.zeros_like(hist_prob, dtype=float)
+        for p, data in enumerate(passengers_station):
+            counts, _ = np.histogram(data, bins=bins)
+            s = counts.sum()
+            row_pdf = counts / s if s > 0 else counts
+            hist_counts[p, :] = row_pdf * P_plot[p]
+
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(hist_counts, cmap='viridis',
+                    cbar_kws={'label': 'People (expected)'},
+                    xticklabels=False, yticklabels=station_labels)
+        plt.title('Train occupancy – expected counts per station')
+        plt.ylabel('Station')
+        plt.tight_layout()
+        plt.savefig(f'occupancy_counts_{i}.png')
+
+def debug():
 
     # A dict from station names to entrance locations, (eastbound, westbound)
     lines = json.load(open("london_underground_lines.json", "rb"))
@@ -460,145 +799,136 @@ if __name__ == "__main__":
     plt.savefig("graph.png")
 
     boarders_df, alighters_df = get_boarders_alighters(
-        "/Users/dan/Downloads/NBT23TWT_outputs.xlsx", line="PIC"
+        "/Users/dan/Downloads/NBT23TWT_outputs.xlsx", line="PIC",
     )
 
     route_graph = populate_boarders_alighters_graph(
         route_graph, boarders_df, alighters_df
     )
 
-    termini = set([r[0] for r in routes] + [r[-1] for r in routes])
+    dir_code   = "WB"                     # westbound example
+    pivot      = "Leicester Square"
 
-    forward_paths = get_all_paths_in_direction(
-        route_graph, "Leicester Square", termini, dir_code="WB"
-    )
+    paths_through_pivot = build_paths_through_pivot(route_graph, pivot, dir_code)
+    full_paths = paths_through_pivot
+    print(f"Found {len(full_paths)} {dir_code} paths through {pivot}:")
+    for p in full_paths:
+        print(" -> ".join(p))
 
-    complete = [p for p in forward_paths if p[-1] in termini]
-    branch_BA = [
-        get_boarders_alighters_path(route_graph, p, p[0], p[-1]) for p in complete
-    ]
+    # merged entrance dict for west/east positions
+    stations = dict(line_entrances["Piccadilly"][0], **line_entrances["Piccadilly"][1])
+    pos_idx  = 1 if dir_code in ["WB", "SB"] else 0   # westbound uses index 1
 
-    # Build a separate model for each 'route' and *then* average
-    for i, (path, boarders, alighters) in enumerate(branch_BA):
+    print(full_paths)
 
-        print(f"\nPath {i}:", " -> ".join(path))
-        print("Boarders per segment:")
-        pprint(list(zip(path, boarders)))
-        print("Alighters per segment:")
-        pprint(list(zip(path, alighters)))
+    num_samples = 1000
+    seed = 42
 
-        stations = dict(
-            line_entrances["Piccadilly"][0], **line_entrances["Piccadilly"][1]
+    for i, full_path in enumerate(paths_through_pivot):
+        # 2) station-based on/off along the *full* path from terminus
+        n_on, n_off = station_arrays_for_path(route_graph, full_path)
+
+        # 3) positions aligned to the full path
+        positions_on = [stations[s][pos_idx] for s in full_path[:-1]]
+
+        # 4) run the model on the full path (starts at the terminus → no fake initial load)
+        passenger_locs, mix_wts, alpha_samples = sample_passenger_locations_per_station(
+            n_on=n_on,
+            n_off=n_off,
+            positions_on=positions_on,
+            path=full_path,
+            num_samples=num_samples,
+            seed=seed,
         )
 
-        idx = 1     # because this run is westbound
+        # 5) slice outputs so we only plot from `pivot` onwards
+        j = full_path.index(pivot)                # pivot row in the path
+        sub_path = full_path[j:]                  # stations from pivot → terminus
+        sub_loc_dict = {st: passenger_locs[st] for st in sub_path[1:]}  # keep order
 
-        positions_on = [stations[s][idx] for s in path[:-1]]   # aligned with n_on / n_off
-
-        # ALSO shift alighters so it is station-based not edge-based
-        station_boarders  = boarders[:]                # already path-aligned
-        station_alighters = [0] + alighters[:-1]       # move each value back by one
-
-        pprint(list(zip(positions_on, station_boarders, station_alighters)))
-
-        print(len(positions_on), len(station_boarders), len(station_alighters))
-
-        print(np.cumsum(station_boarders) - np.cumsum(station_alighters))
-        # exit(0)
-
-        passenger_locations_per_station, mixture_weights_per_station, alpha_samples = (
-            sample_passenger_locations_per_station(
-                n_on        = station_boarders,
-                n_off       = station_alighters,
-                positions_on= positions_on,
-                path        = path,
-                num_samples = 100_000,
-                seed        = 42,
-            )
-        )
-
-        plot_passenger_locations_heatmap(passenger_locations_per_station, path, f"occupancy_stations_path_{i}")
-
-        plot_occupancy_overlay(passenger_locations_per_station, "Knightsbridge", f"occupancy_path_{i}")
+        # plots
+        plot_passenger_locations_heatmap(sub_loc_dict, sub_path, f"occupancy_stations_path_{i}")
+        plot_occupancy_overlay(passenger_locs, "Covent Garden", f"occupancy_path_{i}")
 
         # print([x.shape for x in mixture_weights_per_station.values()])
 
-        print(np.sum(mixture_weights_per_station['Knightsbridge']))
+        # print(np.sum(mixture_weights_per_station['Knightsbridge']))
+        # print(mixture_weights_per_station['Knightsbridge'])
 
-        from scipy.stats import truncnorm
+        # inputs already available in your debug(): full_path, n_on, n_off, stations, dir_code, pivot
+        SCALE = 50                 # samples per person (reduce if memory is tight)
+        STD   = 30                 # cm-ish; same as before
+        idx   = 1 if dir_code in ("WB","SB") else 0   # westbound uses index 1
 
-        passengers_station = []
-        passengers_boarding = []
-        passengers = []
-        for i, station in enumerate(path[:-1]):
+        pivot_idx = full_path.index(pivot)
+
+        passengers           = []        # evolving list of positions on board
+        passengers_station   = []        # snapshots to plot (from pivot onward)
+        station_labels       = []        # y-axis labels (from pivot onward)
+
+        for i, station in enumerate(full_path[:-1]):        # simulate along the entire path
+            # 1) alight FIRST at this station
             np.random.shuffle(passengers)
-            passengers = passengers[:-int(alighters[i]) * 100]
+            off = int(n_off[i])
+            if off > 0:
+                passengers = passengers[:-SCALE * off] if SCALE * off <= len(passengers) else []
 
-            mean = stations[station][1]
-            std = 30
+            # 2) then board at this station
+            mean = stations[station][idx]
+            a, b = (0 - mean) / STD, (100 - mean) / STD
+            on   = int(n_on[i])
+            if on > 0:
+                boarding = truncnorm.rvs(a, b, loc=mean, scale=STD, size=SCALE * on)
+                passengers.extend(boarding)
 
-            a, b = (0 - mean) / std, (100 - mean) / std
+            # 3) record snapshot only from the pivot onward
+            if i >= pivot_idx:
+                passengers_station.append(np.array(passengers))
+                station_labels.append(station)
 
-            boarding = truncnorm.rvs(a, b, loc = mean, scale = std, size = 100 * int(boarders[i]))
-            passengers_boarding.append(boarding)
-            passengers.extend(boarding)
-            passengers_station.append(passengers.copy())
-
-        # Example data creation (Replace this with your actual data)
-        # Let's assume each array has a variable number of data points
-        N =len(passengers_station)  # Number of arrays
-        np.random.seed(0)  # For reproducibility
-
-        # Create a list of N arrays with random data between 0 and 100
-        data_list = passengers_station
-
-        # Define the number of bins and the range
+        # ---------- probability heatmap (rows sum to 1) ----------
         num_bins = 100
-        range_min, range_max = 0, 100
-        bins = np.linspace(range_min, range_max, num_bins + 1)  # 101 edges for 100 bins
-
-        # Initialize a 2D array to hold histogram counts
-        hist_matrix = np.zeros((N, num_bins))
-        hist_matrix_sum = np.zeros((N, num_bins))
-
-        # Compute histograms for each array
-        for i, data in enumerate(data_list):
+        bins = np.linspace(0, 100, num_bins + 1)
+        hist_prob = np.zeros((len(passengers_station), num_bins))
+        for i, data in enumerate(passengers_station):
             counts, _ = np.histogram(data, bins=bins)
-            hist_matrix[i, :] = counts
-            if i > 0:
-                hist_matrix_sum[i, :] = hist_matrix_sum[i - 1, :] + counts
+            s = counts.sum()
+            hist_prob[i, :] = counts / s if s > 0 else counts
 
-        # Optionally, normalize the histograms (e.g., to frequency or probability)
-        # Uncomment the following lines if normalization is desired
-        hist_matrix = hist_matrix / hist_matrix.sum(axis=1, keepdims=True)
-
-        # Plotting the heatmap
         plt.figure(figsize=(12, 8))
-
-        sns.heatmap(hist_matrix, cmap='viridis',
-                    cbar_kws={'label': 'Density'},
-                    xticklabels=False,
-                    yticklabels=path[:-1])  # Hide y-axis labels if N is large
-
-        plt.title(f'Train occupancy')
+        sns.heatmap(hist_prob, cmap='viridis',
+                    cbar_kws={'label': 'Probability'},
+                    xticklabels=False, yticklabels=station_labels)
+        plt.title('Train occupancy – probability per station')
         plt.ylabel('Station')
         plt.tight_layout()
-        plt.savefig('picc_occupancy.pdf')
-        plt.savefig('picc_occupancy.png')
+        plt.savefig('occupancy_prob.png')
 
-        plt.clf()
+        # ---------- expected-counts heatmap (rows scale with people aboard) ----------
+        P_full = expected_onboard_per_station(n_on, n_off)      # along full path
+        P_plot = P_full[pivot_idx:pivot_idx + len(station_labels)]
 
-        # Plotting the heatmap
+        hist_counts = np.zeros_like(hist_prob, dtype=float)
+        for i, data in enumerate(passengers_station):
+            counts, _ = np.histogram(data, bins=bins)
+            s = counts.sum()
+            row_pdf = counts / s if s > 0 else counts
+            hist_counts[i, :] = row_pdf * P_plot[i]
+
         plt.figure(figsize=(12, 8))
-
-        sns.heatmap(hist_matrix_sum, cmap='viridis',
-                    cbar_kws={'label': 'Density'},
-                    xticklabels=False,
-                    yticklabels=path[:-1])  # Hide y-axis labels if N is large
-
-        plt.title(f'Train occupancy')
+        sns.heatmap(hist_counts, cmap='viridis',
+                    cbar_kws={'label': 'People (expected)'},
+                    xticklabels=False, yticklabels=station_labels)
+        plt.title('Train occupancy – expected counts per station')
         plt.ylabel('Station')
         plt.tight_layout()
-        plt.savefig('picc_occupancy_sum.pdf')
-        plt.savefig('picc_occupancy_sum.png')
+        plt.savefig('occupancy_counts.png')
         exit(0)
+
+if __name__ == "__main__":
+    # debug()
+    # occ = get_occupancy()
+    # print(occ.keys())
+    # print(occ['Leicester Square'])
+
+    get_occupancy_hist(this_station = "Leicester Square", direction = "WB", time = "08:00")
