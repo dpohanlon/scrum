@@ -7,10 +7,16 @@ from scipy.stats import truncnorm
 
 mpl.use("Agg")
 
+from datetime import datetime
+
 import numpy as np
 
 import pandas as pd
 import seaborn as sns
+
+import h5py
+
+import os
 
 import re
 
@@ -54,6 +60,73 @@ LONDON_UNDERGROUND_COLORS = {
     "Elizabeth": "#A0A5A9",
 }
 
+def _prepare(df):
+    df = df.copy()
+    df.columns = df.iloc[1]           # row 1 becomes header
+    df = df.iloc[2:].reset_index(drop=True)
+    return df
+
+def _sanitize_station_name(s):
+    return re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
+
+def _round_to_half_hour(tstr):
+    t = datetime.strptime(tstr, "%H:%M")
+    m = (t.minute + 15) // 30 * 30
+    if m == 60:
+        t = (t.replace(minute=0) + timedelta(hours=1))
+    else:
+        t = t.replace(minute=m)
+    return t.strftime("%H:%M")
+
+def _times_30min():
+    return [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+
+def _string_dtype():
+    return h5py.string_dtype(encoding="utf-8")  # vlen utf-8 strings
+
+def _truncnorm_row(bin_centers, mean, std):
+    a = (0 - mean) / std
+    b = (100 - mean) / std
+    vals = truncnorm.pdf(bin_centers, a, b, loc=mean, scale=std)
+    s = vals.sum()
+    return vals / s if s > 0 else vals
+
+def live_relative_crowding(station, maxima_dict):
+    return 1.0
+
+def save_station_maxima_to_json(excel_path, json_path, line="PIC"):
+    def _prepare(df):
+        df = df.copy()
+        df.columns = df.iloc[1]
+        return df.iloc[2:].reset_index(drop=True)
+
+    def _is_timerange(s):
+        s = str(s).strip()
+        return bool(re.fullmatch(r"\d{3,4}-\d{3,4}", s))
+
+    b = _prepare(pd.read_excel(excel_path, sheet_name="Station_Boarders"))
+    a = _prepare(pd.read_excel(excel_path, sheet_name="Station_Alighters"))
+
+    b = b[b["Line"] == line]
+    a = a[a["Line"] == line]
+
+    time_cols_b = [c for c in b.columns if _is_timerange(c)]
+    time_cols_a = [c for c in a.columns if _is_timerange(c)]
+    time_cols = sorted(set(time_cols_b).intersection(time_cols_a))
+
+    for c in time_cols:
+        b[c] = pd.to_numeric(b[c], errors="coerce").fillna(0.0)
+        a[c] = pd.to_numeric(a[c], errors="coerce").fillna(0.0)
+
+    maxima = {}
+    for stn, g in b.groupby("Station"):
+        bb = g[time_cols].sum(axis=0)
+        aa = a[a["Station"] == stn][time_cols].sum(axis=0)
+        tot = (bb + aa) if not aa.empty else bb
+        maxima[stn] = float(tot.max()) if len(tot) else 0.0
+
+    with open(json_path, "w") as f:
+        json.dump(maxima, f, indent=2)
 
 def hex_to_colormap(hex_color, name="custom_colormap", n=256):
     """
@@ -92,7 +165,7 @@ def hex_to_colormap(hex_color, name="custom_colormap", n=256):
 
 #     return boarders_df, alighters_df
 
-def get_boarders_alighters(file_name, line="PIC", time_str=None, tolerance_min=30):
+def get_boarders_alighters(file_name, line="PIC", time_str=None, tolerance_min=30, boarders_df=None, alighters_df=None):
     """
     Read Excel sheets 'Station_Boarders' / 'Station_Alighters'.
     After promoting the 2nd row to headers and dropping the top two rows,
@@ -101,12 +174,6 @@ def get_boarders_alighters(file_name, line="PIC", time_str=None, tolerance_min=3
 
     If no time is given, the original 'Total' column is left as-is.
     """
-
-    def _prepare(df):
-        df = df.copy()
-        df.columns = df.iloc[1]           # row 1 becomes header
-        df = df.iloc[2:].reset_index(drop=True)
-        return df
 
     def _to_minutes(hhmm):
         h, m = map(int, hhmm.split(":"))
@@ -138,9 +205,10 @@ def get_boarders_alighters(file_name, line="PIC", time_str=None, tolerance_min=3
         delta  = abs(int(round(mids[idx] - want_minutes)))
         return chosen, delta
 
-    # read + prep
-    boarders_df  = _prepare(pd.read_excel(file_name, sheet_name="Station_Boarders"))
-    alighters_df = _prepare(pd.read_excel(file_name, sheet_name="Station_Alighters"))
+    if boarders_df is None:
+        boarders_df  = _prepare(pd.read_excel(file_name, sheet_name="Station_Boarders"))
+    if alighters_df is None:
+        alighters_df = _prepare(pd.read_excel(file_name, sheet_name="Station_Alighters"))
 
     # filter line (exact code, e.g. 'PIC')
     boarders_df  = boarders_df[boarders_df["Line"] == line]
@@ -256,6 +324,71 @@ def plot_passenger_locations_heatmap(passenger_locations_per_station, path, name
     plt.tight_layout()
     plt.savefig("occupancy.png" if name == None else name)
 
+def generate_live_overlay(current_time, station, direction, hdf5_dir, maxima_json, out_png, bins=200, std=30, overlay_path="assets/trainsparency.png", line_key="Piccadilly"):
+    tkey = _round_to_half_hour(current_time).replace(":", "")
+    fn = os.path.join(hdf5_dir, f"{_sanitize_station_name(station)}.h5")
+    maxima = json.load(open(maxima_json, "rb"))
+    line_entrances = json.load(open("line_entrances.json", "rb"))
+    stations_pos = dict(line_entrances[line_key][0], **line_entrances[line_key][1])
+    pos_idx = 1 if direction in ("WB", "SB") else 0
+
+    xs = np.linspace(0, 100, bins + 1)
+    centers = 0.5 * (xs[:-1] + xs[1:])
+    mix_total = np.zeros_like(centers, dtype=float)
+
+    with h5py.File(fn, "r") as h5:
+        routes_grp = h5[direction][tkey]["routes"]
+        n_routes = len(routes_grp.keys())
+        for key in sorted(routes_grp.keys(), key=lambda s: int(s[1:])):
+            g = routes_grp[key]
+            full_path = [s for s in g["stations"][...].astype(str)]
+            pivot_idx = int(g.attrs["pivot_idx"])
+            upstream = full_path[:pivot_idx + 1]
+
+            ws = np.array([live_relative_crowding(s, maxima) for s in upstream], dtype=float)
+            sw = ws.sum()
+            ws = ws / sw if sw > 0 else np.ones(len(upstream), dtype=float) / max(1, len(upstream))
+
+            mix_route = np.zeros_like(centers, dtype=float)
+            for s, w in zip(upstream, ws):
+                m = stations_pos[s][pos_idx]
+                mix_route += w * _truncnorm_row(centers, m, std)
+
+            mix_total += mix_route
+
+    mix_total /= max(1, n_routes)
+
+    overlay_img = Image.open(overlay_path).convert("RGBA")
+    img_w, img_h = overlay_img.size
+    aspect = img_w / img_h
+    overlay_np = np.array(overlay_img)
+
+    fig_h = 6
+    fig_w = fig_h * aspect
+    dpi = 70
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+
+    norm = Normalize(vmin=mix_total.min(), vmax=mix_total.max())
+    cmap = hex_to_colormap(LONDON_UNDERGROUND_COLORS.get(line_key, "#003688"))
+    colors = cmap(norm(mix_total))
+
+    bin_w = centers[1] - centers[0]
+    ax.bar(centers, np.ones_like(centers), width=bin_w, color=colors, edgecolor="none", zorder=1)
+
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_title("")
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+
+    extent = [0, 100, 0, 1]
+    ax.imshow(overlay_np, extent=extent, aspect="auto", zorder=10, alpha=1.0, interpolation="bilinear")
+
+    plt.tight_layout()
+    fig.savefig(out_png, dpi=dpi, bbox_inches="tight", transparent=True)
 
 def plot_occupancy_overlay(passenger_locations_per_station, station, name = None):
 
@@ -642,7 +775,7 @@ def build_paths_through_pivot(G, pivot, dir_code):
                 paths.append(prefix[:-1] + tail)  # avoid double 'pivot'
     return paths
 
-def get_paths(station, direction, time):
+def get_paths(station, direction, time, boarders_file = "/Users/dan/Downloads/NBT23TWT_outputs.xlsx", boarders_df=None, alighters_df=None):
 
     lines = json.load(open("london_underground_lines.json", "rb"))
     line_entrances = json.load(open("line_entrances.json", "rb"))
@@ -657,7 +790,7 @@ def get_paths(station, direction, time):
     route_graph = create_line_graph(routes)
 
     boarders_df, alighters_df = get_boarders_alighters(
-        "/Users/dan/Downloads/NBT23TWT_outputs.xlsx", line="PIC", time_str = time
+        boarders_file, line="PIC", time_str = time, boarders_df=boarders_df, alighters_df=alighters_df
     )
 
     route_graph = populate_boarders_alighters_graph(
@@ -703,9 +836,11 @@ def get_occupancy(station = "Leicester Square", direction = "WB", time = "08:00"
 
     return locs
 
-def get_occupancy_hist(this_station = "Leicester Square", direction = "WB", time = "08:00"):
+def get_occupancy_hist(this_station = "Leicester Square", direction = "WB", time = "08:00", plot = False):
 
     paths_through_pivot, route_graph, stations = get_paths(this_station, direction, time)
+
+    counts = []
 
     for i, full_path in enumerate(paths_through_pivot):
 
@@ -742,43 +877,130 @@ def get_occupancy_hist(this_station = "Leicester Square", direction = "WB", time
                 passengers_station.append(np.array(passengers))
                 station_labels.append(station)
 
-        # ---------- probability heatmap (rows sum to 1) ----------
-        num_bins = 100
-        bins = np.linspace(0, 100, num_bins + 1)
-        hist_prob = np.zeros((len(passengers_station), num_bins))
-        for p, data in enumerate(passengers_station):
-            counts, _ = np.histogram(data, bins=bins)
-            s = counts.sum()
-            hist_prob[p, :] = counts / s if s > 0 else counts
-
-        plt.figure(figsize=(12, 8))
-        sns.heatmap(hist_prob, cmap='viridis',
-                    cbar_kws={'label': 'Probability'},
-                    xticklabels=False, yticklabels=station_labels)
-        plt.title('Train occupancy – probability per station')
-        plt.ylabel('Station')
-        plt.tight_layout()
-        plt.savefig(f'occupancy_prob_{i}.png')
-
         # ---------- expected-counts heatmap (rows scale with people aboard) ----------
         P_full = expected_onboard_per_station(n_on, n_off)      # along full path
         P_plot = P_full[pivot_idx:pivot_idx + len(station_labels)]
 
-        hist_counts = np.zeros_like(hist_prob, dtype=float)
-        for p, data in enumerate(passengers_station):
-            counts, _ = np.histogram(data, bins=bins)
-            s = counts.sum()
-            row_pdf = counts / s if s > 0 else counts
-            hist_counts[p, :] = row_pdf * P_plot[p]
+        counts.append(P_full)
 
-        plt.figure(figsize=(12, 8))
-        sns.heatmap(hist_counts, cmap='viridis',
-                    cbar_kws={'label': 'People (expected)'},
-                    xticklabels=False, yticklabels=station_labels)
-        plt.title('Train occupancy – expected counts per station')
-        plt.ylabel('Station')
-        plt.tight_layout()
-        plt.savefig(f'occupancy_counts_{i}.png')
+        if plot:
+
+            # ---------- probability heatmap (rows sum to 1) ----------
+            num_bins = 100
+            bins = np.linspace(0, 100, num_bins + 1)
+            hist_prob = np.zeros((len(passengers_station), num_bins))
+            for p, data in enumerate(passengers_station):
+                counts, _ = np.histogram(data, bins=bins)
+                s = counts.sum()
+                hist_prob[p, :] = counts / s if s > 0 else counts
+
+            plt.figure(figsize=(12, 8))
+            sns.heatmap(hist_prob, cmap='viridis',
+                        cbar_kws={'label': 'Probability'},
+                        xticklabels=False, yticklabels=station_labels)
+            plt.title('Train occupancy – probability per station')
+            plt.ylabel('Station')
+            plt.tight_layout()
+            plt.savefig(f'occupancy_prob_{i}.png')
+
+            hist_counts = np.zeros_like(hist_prob, dtype=float)
+            for p, data in enumerate(passengers_station):
+                counts, _ = np.histogram(data, bins=bins)
+                s = counts.sum()
+                row_pdf = counts / s if s > 0 else counts
+                hist_counts[p, :] = row_pdf * P_plot[p]
+
+            plt.figure(figsize=(12, 8))
+            sns.heatmap(hist_counts, cmap='viridis',
+                        cbar_kws={'label': 'People (expected)'},
+                        xticklabels=False, yticklabels=station_labels)
+            plt.title('Train occupancy – expected counts per station')
+            plt.ylabel('Station')
+            plt.tight_layout()
+            plt.savefig(f'occupancy_counts_{i}.png')
+
+    return counts
+
+def save_data(boarders_file, output_dir, directions=("WB", "EB"), stations=None, times=None, std=30):
+    os.makedirs(output_dir, exist_ok=True)
+    line_entrances = json.load(open("line_entrances.json", "rb"))
+    all_stations = set(line_entrances["Piccadilly"][0].keys()) | set(line_entrances["Piccadilly"][1].keys())
+    if stations is None:
+        stations = sorted(all_stations)
+    if times is None:
+        times = _times_30min()
+
+    boarders_df  = _prepare(pd.read_excel(boarders_file, sheet_name="Station_Boarders"))
+    alighters_df = _prepare(pd.read_excel(boarders_file, sheet_name="Station_Alighters"))
+
+    for stn in stations:
+        safe_stn = _sanitize_station_name(stn)
+        fname = os.path.join(output_dir, f"{safe_stn}.h5")
+        with h5py.File(fname, "w") as h5:
+            h5.attrs["pivot_station"] = stn
+            for direction in directions:
+                dir_grp = h5.create_group(direction)
+                for time_str in times:
+                    print(direction, time_str, stn)
+                    paths_through_pivot, route_graph, stations_pos = get_paths(
+                        stn, direction, time_str, boarders_df=boarders_df, alighters_df=alighters_df
+                    )
+                    tgrp = dir_grp.create_group(time_str.replace(":", ""))
+                    routes_grp = tgrp.create_group("routes")
+                    for i, full_path in enumerate(paths_through_pivot):
+                        n_on, n_off = station_arrays_for_path(route_graph, full_path)
+                        p_full = expected_onboard_per_station(n_on, n_off)
+                        g = routes_grp.create_group(f"r{i}")
+                        g.create_dataset("stations", data=np.array(full_path, dtype=_string_dtype()))
+                        g.create_dataset("counts", data=np.array(p_full, dtype=np.float64))
+                        g.attrs["pivot_idx"] = int(full_path.index(stn))
+
+
+def generate_live_histogram(current_time, station, direction, hdf5_dir, maxima_json, out_png, bins=100, std=30):
+    tkey = _round_to_half_hour(current_time).replace(":", "")
+    fn = os.path.join(hdf5_dir, f"{_sanitize_station_name(station)}.h5")
+    maxima = json.load(open(maxima_json, "rb"))
+    line_entrances = json.load(open("line_entrances.json", "rb"))
+    stations_pos = dict(line_entrances["Piccadilly"][0], **line_entrances["Piccadilly"][1])
+    pos_idx = 1 if direction in ("WB", "SB") else 0
+
+    xs = np.linspace(0, 100, bins + 1)
+    centers = 0.5 * (xs[:-1] + xs[1:])
+    mix_total = np.zeros_like(centers, dtype=float)
+
+    with h5py.File(fn, "r") as h5:
+        routes_grp = h5[direction][tkey]["routes"]
+        n_routes = len(routes_grp.keys())
+        for key in sorted(routes_grp.keys(), key=lambda s: int(s[1:])):
+            g = routes_grp[key]
+            full_path = [s for s in g["stations"][...].astype(str)]
+            pivot_idx = int(g.attrs["pivot_idx"])
+            upstream = full_path[:pivot_idx + 1]
+
+            ws = np.array([live_relative_crowding(s, maxima) for s in upstream], dtype=float)
+            sw = ws.sum()
+            if sw > 0:
+                ws = ws / sw
+            else:
+                ws = np.ones(len(upstream), dtype=float) / max(1, len(upstream))
+
+            mix_route = np.zeros_like(centers, dtype=float)
+            for s, w in zip(upstream, ws):
+                m = stations_pos[s][pos_idx]
+                mix_route += w * _truncnorm_row(centers, m, std)
+
+            mix_total += mix_route
+
+    mix_total /= max(1, n_routes)
+    plt.figure()
+    bin_w = centers[1] - centers[0]
+    plt.bar(centers, mix_total, width=bin_w, edgecolor="none")
+    plt.xticks([])
+    plt.yticks([])
+    plt.tight_layout()
+    plt.savefig(out_png, transparent=True)
+
+
 
 def debug():
 
@@ -931,4 +1153,11 @@ if __name__ == "__main__":
     # print(occ.keys())
     # print(occ['Leicester Square'])
 
-    get_occupancy_hist(this_station = "Leicester Square", direction = "WB", time = "08:00")
+    # get_occupancy_hist(this_station = "Leicester Square", direction = "WB", time = "08:00")
+
+    # save_station_maxima_to_json('/Users/dan/Downloads/NBT23TWT_outputs.xlsx', '')
+    # save_data('/Users/dan/Downloads/NBT23TWT_outputs.xlsx', 'data')
+
+    generate_live_histogram("09:35", "South Kensington", "WB", 'data', 'historical_maxima.json', 'hist.png', bins=100, std=30)
+
+    generate_live_overlay("09:35", "South Kensington", "WB", 'data', 'historical_maxima.json', 'overlay.png', bins=200, std=30, overlay_path="assets/trainsparency.png", line_key="Piccadilly")
