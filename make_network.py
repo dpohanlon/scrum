@@ -1,32 +1,8 @@
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-
-mpl.use("Agg")
-
-import numpy as np
-
 import pandas as pd
-
-from matplotlib import rcParams
-
-from tqdm import tqdm
 
 import networkx as nx
 
 import json
-
-import re
-
-rcParams["axes.facecolor"] = "FFFFFF"
-rcParams["savefig.facecolor"] = "FFFFFF"
-rcParams["xtick.direction"] = "in"
-rcParams["ytick.direction"] = "in"
-
-rcParams["axes.linewidth"] = 2.0
-
-rcParams.update({"figure.autolayout": True})
-
-plt.rcParams["figure.figsize"] = (6, 6)
 
 
 def create_london_underground_graph(df, separate_lines=True):
@@ -192,6 +168,24 @@ def save_sequences_to_json(sequences_dict, output_path):
 
 
 if __name__ == "__main__":
+
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+
+    mpl.use("Agg")
+
+    from matplotlib import rcParams
+
+    rcParams["axes.facecolor"] = "FFFFFF"
+    rcParams["savefig.facecolor"] = "FFFFFF"
+    rcParams["xtick.direction"] = "in"
+    rcParams["ytick.direction"] = "in"
+
+    rcParams["axes.linewidth"] = 2.0
+
+    rcParams.update({"figure.autolayout": True})
+
+    plt.rcParams["figure.figsize"] = (6, 6)
 
     excel_file_path = "/Users/dan/Downloads/NBT23TWT_outputs.xlsx"
 

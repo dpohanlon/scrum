@@ -5,6 +5,7 @@ from numpyro.infer import Predictive
 
 import jax
 
+
 def compute_alphas(n_on, n_off):
     """
     α_k = fraction that REMAINS aboard at station k AFTER alighting (before boarding at k).
@@ -16,7 +17,7 @@ def compute_alphas(n_on, n_off):
 
     for on, off in zip(n_on, n_off):
         L_before = load
-        off_eff  = min(off, L_before)
+        off_eff = min(off, L_before)
         L_after_alight = L_before - off_eff
 
         alpha_k = 1.0 if L_before == 0 else L_after_alight / L_before
@@ -25,6 +26,7 @@ def compute_alphas(n_on, n_off):
         load = L_after_alight + on
 
     return jnp.array(alphas)
+
 
 @jax.jit
 def precompute_survivors(n_on, alpha):
@@ -44,14 +46,13 @@ def precompute_survivors(n_on, alpha):
     # Fill in survivors
     for r in range(num_rounds):
         for k in range(num_rounds):
-            if (
-                k >= r
-            ):
+            if k >= r:
                 s = n_on[r] * product_of_alphas(r, k)
             else:
                 s = 0.0
             survivors = survivors.at[r, k].set(s)
     return survivors
+
 
 def passenger_location_model(n_on, n_off, positions_on):
     """
@@ -81,8 +82,7 @@ def passenger_location_model(n_on, n_off, positions_on):
 
         total_k = jnp.sum(survivors_2d[: k + 1, k])
         mixture_weights_k = jnp.where(
-            total_k > 0, survivors_2d[: k + 1, k]/ total_k,
-            jnp.zeros(k + 1)
+            total_k > 0, survivors_2d[: k + 1, k] / total_k, jnp.zeros(k + 1)
         )
 
         final_mix_k = dist.MixtureSameFamily(
