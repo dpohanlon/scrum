@@ -9,7 +9,7 @@
 This project predicts train car occupancy on the London Underground using
 a Gaussian mixture model. Station sequences for each line are
 extracted from Transport for London data and used to estimate how many
-passengers remain in each car after every stop.
+passengers remain in each car after every stop. You can find an associated web app [here](https://3m4uez9a8p.us-east-1.awsapprunner.com/).
 
 ## Approach
 - Build directed graphs of stations for each line and extract all branches.
