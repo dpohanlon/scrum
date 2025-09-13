@@ -3,6 +3,7 @@ name = "tfl"
 version = "0.1.0"
 description = "Passenger flow modelling utilities"
 authors = ["Transit Team <team@example.com>"]
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -11,7 +12,7 @@ numpyro = "^0.14.0"
 pandas = "^2.0.0"
 networkx = "^3.0"
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 pytest = "^7.4"
 
 [build-system]
