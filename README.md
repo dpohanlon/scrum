@@ -4,9 +4,10 @@
       London underground train car occupancy prediction
 </p>
 
+---
+
 This project predicts train car occupancy on the London Underground using
-[JAX](https://github.com/google/jax), [NumPyro](https://github.com/pyro-ppl/numpyro)
-and [NetworkX](https://networkx.org/). Station sequences for each line are
+a Gaussian mixture model. Station sequences for each line are
 extracted from Transport for London data and used to estimate how many
 passengers remain in each car after every stop.
 
@@ -25,8 +26,7 @@ Running the model yields:
   where passengers stand within a car.
 
 ## Status
-Only the **Piccadilly line** is currently included.  Support for additional
-lines will be added over time.
+Only the **Piccadilly line** is currently included at the moment.
 
 ## Development
 Install dependencies and run the tests with Poetry:
@@ -35,4 +35,3 @@ Install dependencies and run the tests with Poetry:
 poetry install --no-root
 poetry run pytest -q
 ```
-
