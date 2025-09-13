@@ -134,20 +134,11 @@ def extract_station_sequences_from_graphs(line_graphs):
                         if len(path) > 1:
                             all_paths.append(path)
 
-        # Remove duplicate paths that might have been found from different start points
+        # Remove duplicate paths and sub-paths discovered from different start points
         unique_paths = []
-        seen_paths = set()
         for path in sorted(all_paths, key=len, reverse=True):
-            path_tuple = tuple(path)
-            # Ensure no sub-path is added if a longer path containing it already exists
-            if not any(
-                tuple(path) in seen
-                for seen in seen_paths
-                if len(seen) > len(path_tuple)
-            ):
-                if path_tuple not in seen_paths:
-                    unique_paths.append(path)
-                    seen_paths.add(path_tuple)
+            if not any(_is_subsequence(path, seen) for seen in unique_paths):
+                unique_paths.append(path)
 
         lines_dict[line] = unique_paths
 
