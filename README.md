@@ -20,10 +20,16 @@ passengers remain in each car after every stop.
 
 ## Outputs
 Running the model yields:
-- **Expected train-car occupancy per station** – the predicted number of riders
-  in a car when the train arrives at each stop.
+<p align="center">
+  <img width="600" height="400" src="assets/occupancy_prob.png">
+</p>
+
 - **Passenger location samples** – draws from a mixture distribution describing
   where passengers stand within a car.
+
+<p align="center">
+  <img width="600" height="30" src="assets/train.png">
+</p>
 
 ## Status
 Only the **Piccadilly line** is currently included at the moment.

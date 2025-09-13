@@ -1121,7 +1121,7 @@ def debug():
 
 
 if __name__ == "__main__":
-    # debug()
+    debug()
     # occ = get_occupancy()
     # print(occ.keys())
     # print(occ['Leicester Square'])
@@ -1131,13 +1131,13 @@ if __name__ == "__main__":
     # save_station_maxima_to_json('/Users/dan/Downloads/NBT23TWT_outputs.xlsx', '')
     # save_data('/Users/dan/Downloads/NBT23TWT_outputs.xlsx', 'data')
 
-    generate_live_histogram(
-        "09:35",
-        "South Kensington",
-        "WB",
-        "data",
-        "historical_maxima.json",
-        "hist.png",
-        bins=100,
-        std=30,
-    )
+    # generate_live_histogram(
+    #     "09:35",
+    #     "South Kensington",
+    #     "WB",
+    #     "data",
+    #     "historical_maxima.json",
+    #     "hist.png",
+    #     bins=100,
+    #     std=30,
+    # )

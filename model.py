@@ -15,7 +15,9 @@ def compute_alphas(n_on, n_off):
     argument.
     """
 
-    dtype = jnp.result_type(n_on, n_off, 0.0)
+    n_on = jnp.asarray(n_on)
+    n_off = jnp.asarray(n_off)
+    dtype = jnp.result_type(n_on.dtype, n_off.dtype, 0.0)
     n_on = n_on.astype(dtype)
     n_off = n_off.astype(dtype)
 
@@ -45,6 +47,7 @@ def precompute_survivors(n_on, alpha):
     construct the same matrix in a single expression.
     """
 
+    n_on = jnp.asarray(n_on)
     dtype = n_on.dtype
     alpha_cum = jnp.cumprod(jnp.concatenate([jnp.ones(1, dtype=dtype), alpha]))
     left = jnp.where(alpha_cum[1:] > 0, n_on / alpha_cum[1:], 0.0)
@@ -141,7 +144,8 @@ def expected_passengers_per_station(n_on, n_off):
         The expected number of passengers remaining on the train upon arrival
         at each station in the path.
     """
-
+    n_on = jnp.asarray(n_on)
+    n_off = jnp.asarray(n_off)
     alpha = compute_alphas(n_on, n_off)
     survivors = precompute_survivors(n_on, alpha)
     return survivors.sum(axis=0)
