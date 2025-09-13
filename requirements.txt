@@ -1,0 +1,6 @@
+jax
+jaxlib
+numpyro
+pandas
+networkx
+pytest
