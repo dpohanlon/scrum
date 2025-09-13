@@ -4,25 +4,34 @@
       London underground train car occupancy prediction
 </p>
 
-Installation
 ---
-Install from PyPI
+
+This project predicts train car occupancy on the London Underground using
+a Gaussian mixture model. Station sequences for each line are
+extracted from Transport for London data and used to estimate how many
+passengers remain in each car after every stop.
+
+## Approach
+- Build directed graphs of stations for each line and extract all branches.
+- For a chosen branch, propagate boarding and alighting counts with vectorised
+  JAX helpers to estimate how many riders remain in a car after each stop.
+- Use these counts to sample passenger locations and compute the expected
+  occupancy at every station.
+
+## Outputs
+Running the model yields:
+- **Expected train-car occupancy per station** – the predicted number of riders
+  in a car when the train arrives at each stop.
+- **Passenger location samples** – draws from a mixture distribution describing
+  where passengers stand within a car.
+
+## Status
+Only the **Piccadilly line** is currently included at the moment.
+
+## Development
+Install dependencies and run the tests with Poetry:
+
 ```bash
-pip install brioche-enrichment
-```
-
-or install from the Github repository
-```bash
-git clone git@github.com:dpohanlon/brioche.git
-pip install -r requirements.txt .
-```
-
-Usage
----
-Prepare some data in a contingency table format, with row and column set annotations
-```python
-row_names = ["a", "b", "c", ...]
-col_names = ["l", "m", "n", ...]
-
-data = np.array([[30, 27, 10, ...], [28, 25, 11, ...], [31, 29, 15, ...], ...])
+poetry install --no-root
+poetry run pytest -q
 ```
